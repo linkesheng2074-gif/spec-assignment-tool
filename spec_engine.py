@@ -1434,8 +1434,54 @@ def main():
     print("\n全部完成。")
 
 
-main()
+def run_analysis(
+    lot_dir,
+    template_file,
+    assign_file,
+    target_file,
+    sim_file,
+    output_file
+):
+    template_df = read_template(template_file)
+    assign_df = read_assign_standard(assign_file)
+    target_df = read_target_spec(target_file)
+    sim_df = read_sim_value(sim_file)
+    raw_df = read_all_lots(lot_dir)
 
-from google.colab import files
+    summary_df = build_summary(
+        template_df,
+        raw_df,
+        assign_df,
+        target_df,
+        sim_df
+    )
 
-files.download("/content/output/spec_assignment_output.xlsx")
+    raw_pivot_df = build_raw_pivot(raw_df)
+
+    need_assign_df = build_need_check_assign(summary_df)
+    need_target_df = build_need_check_target(summary_df)
+    need_sim_df = build_need_check_sim(summary_df)
+
+    export_excel(
+        summary_df,
+        raw_df,
+        raw_pivot_df,
+        need_assign_df,
+        need_target_df,
+        need_sim_df,
+        output_file
+    )
+
+    return {
+        "summary_df": summary_df,
+        "raw_df": raw_df,
+        "raw_pivot_df": raw_pivot_df,
+        "need_assign_df": need_assign_df,
+        "need_target_df": need_target_df,
+        "need_sim_df": need_sim_df,
+        "output_file": output_file,
+    }
+
+
+if __name__ == "__main__":
+    main()
