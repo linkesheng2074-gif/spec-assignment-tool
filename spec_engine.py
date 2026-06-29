@@ -96,7 +96,12 @@ def clean_column_name(x):
     s = s.replace(" ", "")
     s = s.replace("_", "")
     s = s.replace("-", "")
+    s = s.replace("\n", "")
+    s = s.replace("\r", "")
+    s = s.replace("\t", "")
     s = s.replace("℃", "C")
+    s = s.replace("°C", "C")
+    s = s.replace("°", "")
     return s.upper()
 
 
@@ -456,7 +461,7 @@ def read_template(template_file):
     """
     读取汇总模板 template.xlsx。
 
-    支持你现在的模板格式：
+    支持模板格式：
     A: Parameter
     B: Spec_Type
     C: Simulated_90℃
@@ -467,16 +472,12 @@ def read_template(template_file):
     H: Target_130℃
     I: Unit
     J: Assign_Rule
-
-    如果模板只有表头、没有参数行，也允许继续运行。
-    后续会从 Lot 数据里自动新增所有 Parameter。
     """
 
     df = pd.read_excel(template_file, sheet_name=0, header=None)
 
     header_row_idx = None
 
-    # 自动寻找表头行
     for i in range(min(20, len(df))):
         row_values = [normalize_text(v) for v in df.iloc[i].tolist()]
         row_text = " ".join(row_values)
@@ -501,6 +502,24 @@ def read_template(template_file):
         elif key in ["SPECTYPE", "TYPE", "规格类型", "参数类型"]:
             col_map["Spec_Type"] = idx
 
+        elif key in [
+            "SIMULATED90C", "SIMULATED90", "SIM90C", "SIM90",
+            "90CSIMULATED", "90CSIM"
+        ]:
+            col_map["Simulated_90C"] = idx
+
+        elif key in [
+            "SIMULATED110C", "SIMULATED110", "SIM110C", "SIM110",
+            "110CSIMULATED", "110CSIM"
+        ]:
+            col_map["Simulated_110C"] = idx
+
+        elif key in [
+            "SIMULATED130C", "SIMULATED130", "SIM130C", "SIM130",
+            "130CSIMULATED", "130CSIM"
+        ]:
+            col_map["Simulated_130C"] = idx
+
         elif key in ["TARGET90C", "TARGET90", "90CTARGET", "90C目标", "目标规格90C"]:
             col_map["Target_90C"] = idx
 
@@ -519,10 +538,12 @@ def read_template(template_file):
     if "Parameter" not in col_map:
         raise ValueError("汇总模板缺少 Parameter 列，请确认 A列表头为 Parameter。")
 
-    # 如果某些列没有找到，就给默认空值
     required_output_cols = [
         "Parameter",
         "Spec_Type",
+        "Simulated_90C",
+        "Simulated_110C",
+        "Simulated_130C",
         "Target_90C",
         "Target_110C",
         "Target_130C",
@@ -532,13 +553,15 @@ def read_template(template_file):
 
     rows = []
 
-    # 从表头下一行开始读取参数
     for i in range(header_row_idx + 1, len(df)):
         row = df.iloc[i]
 
         parameter = normalize_text(row[col_map["Parameter"]]) if "Parameter" in col_map else ""
-
         spec_type = normalize_text(row[col_map["Spec_Type"]]) if "Spec_Type" in col_map else ""
+
+        simulated_90 = to_number(row[col_map["Simulated_90C"]]) if "Simulated_90C" in col_map else np.nan
+        simulated_110 = to_number(row[col_map["Simulated_110C"]]) if "Simulated_110C" in col_map else np.nan
+        simulated_130 = to_number(row[col_map["Simulated_130C"]]) if "Simulated_130C" in col_map else np.nan
 
         target_90 = to_number(row[col_map["Target_90C"]]) if "Target_90C" in col_map else np.nan
         target_110 = to_number(row[col_map["Target_110C"]]) if "Target_110C" in col_map else np.nan
@@ -547,13 +570,15 @@ def read_template(template_file):
         unit = normalize_text(row[col_map["Unit"]]) if "Unit" in col_map else ""
         rule = normalize_text(row[col_map["Assign_Rule"]]) if "Assign_Rule" in col_map else ""
 
-        # 空行跳过
         if not parameter and not spec_type and not rule:
             continue
 
         rows.append({
             "Parameter": parameter,
             "Spec_Type": spec_type,
+            "Simulated_90C": simulated_90,
+            "Simulated_110C": simulated_110,
+            "Simulated_130C": simulated_130,
             "Target_90C": target_90,
             "Target_110C": target_110,
             "Target_130C": target_130,
@@ -561,7 +586,6 @@ def read_template(template_file):
             "Assign_Rule": rule,
         })
 
-    # 允许空模板
     template_df = pd.DataFrame(rows, columns=required_output_cols)
 
     if not template_df.empty:
@@ -1064,6 +1088,10 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
         summary_rows.append({
             "Parameter": parameter,
             "Spec_Type": spec_type,
+            "Simulated_90C": round_value(row_dict["Simulated_90C"]),
+            "Simulated_110C": round_value(row_dict["Simulated_110C"]),
+            "Simulated_130C": round_value(row_dict["Simulated_130C"]),
+
             "Target_90C": round_value(row_dict["Target_90C"]),
             "Target_110C": round_value(row_dict["Target_110C"]),
             "Target_130C": round_value(row_dict["Target_130C"]),
