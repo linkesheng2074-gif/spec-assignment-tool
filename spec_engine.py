@@ -989,6 +989,9 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
                     add_rows_list.append({
                         "Parameter": p,
                         "Spec_Type": assign_row.get("Spec_Type", ""),
+                        "Simulated_90C": np.nan,
+                        "Simulated_110C": np.nan,
+                        "Simulated_130C": np.nan,
                         "Target_90C": np.nan,
                         "Target_110C": np.nan,
                         "Target_130C": np.nan,
@@ -999,6 +1002,9 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
                 add_rows_list.append({
                     "Parameter": p,
                     "Spec_Type": "",
+                    "Simulated_90C": np.nan,
+                    "Simulated_110C": np.nan,
+                    "Simulated_130C": np.nan,
                     "Target_90C": np.nan,
                     "Target_110C": np.nan,
                     "Target_130C": np.nan,
@@ -1018,6 +1024,9 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
         row_dict = {
             "Parameter": parameter,
             "Spec_Type": row.get("Spec_Type", ""),
+            "Simulated_90C": row.get("Simulated_90C", np.nan),
+            "Simulated_110C": row.get("Simulated_110C", np.nan),
+            "Simulated_130C": row.get("Simulated_130C", np.nan),
             "Target_90C": row.get("Target_90C", np.nan),
             "Target_110C": row.get("Target_110C", np.nan),
             "Target_130C": row.get("Target_130C", np.nan),
