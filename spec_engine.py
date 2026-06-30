@@ -321,19 +321,22 @@ def read_sim_value(sim_file):
 
         elif key in [
             "SIMWORST90C", "SIM90C", "SIMUPTO90C", "90CSIM",
-            "90C仿真", "仿真90C", "90度仿真"
+            "SIMULATED90C", "SIMULATED90", "90CSIMULATED",
+            "90C仿真", "仿真90C", "90度仿真", "SIMULATED_90C"
         ]:
             col_map[col] = "Sim_Worst_90C"
 
         elif key in [
             "SIMWORST110C", "SIM110C", "SIMUPTO110C", "110CSIM",
-            "110C仿真", "仿真110C", "110度仿真"
+            "SIMULATED110C", "SIMULATED110", "110CSIMULATED",
+            "110C仿真", "仿真110C", "110度仿真", "SIMULATED_110C"
         ]:
             col_map[col] = "Sim_Worst_110C"
 
         elif key in [
             "SIMWORST130C", "SIM130C", "SIMUPTO130C", "130CSIM",
-            "130C仿真", "仿真130C", "130度仿真"
+            "SIMULATED130C", "SIMULATED130", "130CSIMULATED",
+            "130C仿真", "仿真130C", "130度仿真", "SIMULATED_130C"
         ]:
             col_map[col] = "Sim_Worst_130C"
 
@@ -1076,6 +1079,20 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
         sim_90 = sim_info["Sim_Worst_90C"]
         sim_110 = sim_info["Sim_Worst_110C"]
         sim_130 = sim_info["Sim_Worst_130C"]
+        # Simulated 三列优先使用上传的 sim_value.xlsx
+        # 如果 sim_value.xlsx 没有值，再保留 template.xlsx 里的 Simulated 值
+       simulated_90 = sim_90
+       simulated_110 = sim_110
+       simulated_130 = sim_130
+
+       if pd.isna(simulated_90):
+           simulated_90 = row_dict.get("Simulated_90C", np.nan)
+
+       if pd.isna(simulated_110):
+           simulated_110 = row_dict.get("Simulated_110C", np.nan)
+
+       if pd.isna(simulated_130):
+           simulated_130 = row_dict.get("Simulated_130C", np.nan)
 
         delta_typ = calc_delta_percent(avg_25, sim_typ)
         delta_90 = calc_delta_percent(worst_90, sim_90)
@@ -1097,9 +1114,9 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
         summary_rows.append({
             "Parameter": parameter,
             "Spec_Type": spec_type,
-            "Simulated_90C": round_value(row_dict["Simulated_90C"]),
-            "Simulated_110C": round_value(row_dict["Simulated_110C"]),
-            "Simulated_130C": round_value(row_dict["Simulated_130C"]),
+            "Simulated_90C": round_value(simulated_90),
+            "Simulated_110C": round_value(simulated_110),
+            "Simulated_130C": round_value(simulated_130),
 
             "Target_90C": round_value(row_dict["Target_90C"]),
             "Target_110C": round_value(row_dict["Target_110C"]),
@@ -1123,10 +1140,6 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
 
             "Sim_Parameter": sim_info["Sim_Parameter"],
             "Sim_Typ_25C": round_value(sim_typ),
-            "Sim_Worst_90C": round_value(sim_90),
-            "Sim_Worst_110C": round_value(sim_110),
-            "Sim_Worst_130C": round_value(sim_130),
-
             "Delta_vs_Sim_Typ_25C_%": percent_value(delta_typ),
             "Delta_vs_Sim_90C_%": percent_value(delta_90),
             "Delta_vs_Sim_110C_%": percent_value(delta_110),
