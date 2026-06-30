@@ -1210,10 +1210,9 @@ def build_need_check_sim(summary_df):
     return summary_df[
         (summary_df["Sim_Parameter"].astype(str).str.strip() == "") |
         (
-            (summary_df["Sim_Typ_25C"].astype(str).str.strip() == "") &
-            (summary_df["Sim_Worst_90C"].astype(str).str.strip() == "") &
-            (summary_df["Sim_Worst_110C"].astype(str).str.strip() == "") &
-            (summary_df["Sim_Worst_130C"].astype(str).str.strip() == "")
+            (summary_df["Simulated_90C"].astype(str).str.strip() == "") &
+            (summary_df["Simulated_110C"].astype(str).str.strip() == "") &
+            (summary_df["Simulated_130C"].astype(str).str.strip() == "")
         )
     ].copy()
 
