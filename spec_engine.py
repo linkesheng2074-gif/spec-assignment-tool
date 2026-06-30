@@ -1085,14 +1085,14 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
         simulated_110 = sim_110
         simulated_130 = sim_130
 
-       if pd.isna(simulated_90):
-           simulated_90 = row_dict.get("Simulated_90C", np.nan)
+        if pd.isna(simulated_90):
+            simulated_90 = row_dict.get("Simulated_90C", np.nan)
 
-       if pd.isna(simulated_110):
-           simulated_110 = row_dict.get("Simulated_110C", np.nan)
+        if pd.isna(simulated_110):
+            simulated_110 = row_dict.get("Simulated_110C", np.nan)
 
-       if pd.isna(simulated_130):
-           simulated_130 = row_dict.get("Simulated_130C", np.nan)
+        if pd.isna(simulated_130):
+            simulated_130 = row_dict.get("Simulated_130C", np.nan)
 
         delta_typ = calc_delta_percent(avg_25, sim_typ)
         delta_90 = calc_delta_percent(worst_90, sim_90)
