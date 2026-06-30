@@ -1081,9 +1081,9 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
         sim_130 = sim_info["Sim_Worst_130C"]
         # Simulated 三列优先使用上传的 sim_value.xlsx
         # 如果 sim_value.xlsx 没有值，再保留 template.xlsx 里的 Simulated 值
-       simulated_90 = sim_90
-       simulated_110 = sim_110
-       simulated_130 = sim_130
+        simulated_90 = sim_90
+        simulated_110 = sim_110
+        simulated_130 = sim_130
 
        if pd.isna(simulated_90):
            simulated_90 = row_dict.get("Simulated_90C", np.nan)
