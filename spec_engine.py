@@ -135,7 +135,36 @@ def clean_stat(x):
         return "Max"
 
     return ""
+    
+def detect_edge_from_text(x):
+    """
+    从参数名、测试条件、表头中识别 FE / RE。
+    """
+    s = normalize_text(x).upper()
 
+    if not s:
+        return ""
+
+    if "FALLING" in s:
+        return "FE"
+
+    if "RISING" in s:
+        return "RE"
+
+    # 常见写法
+    if re.search(r"(^|[^A-Z0-9])FE([^A-Z0-9]|$)", s):
+        return "FE"
+
+    if re.search(r"(^|[^A-Z0-9])RE([^A-Z0-9]|$)", s):
+        return "RE"
+
+    if "_FE" in s or s.endswith("FE"):
+        return "FE"
+
+    if "_RE" in s or s.endswith("RE"):
+        return "RE"
+
+    return ""
 
 def is_prefix_match(actual_key, base_key):
     """
@@ -698,11 +727,33 @@ def read_lot_index(file_path):
         if stat in ["Min", "Typ", "Max"] and temp is not None:
             value_cols.append(c)
 
-    if not value_cols:
-        print(f"[跳过] {lot_name}：没有识别到有效温度数据列。")
-        return pd.DataFrame()
+    value_infos = []
 
-    first_value_col = min(value_cols)
+    for c in range(df.shape[1]):
+        stat = clean_stat(stat_row.iloc[c])
+        temp = parse_temp(temp_row.iloc[c])
+
+        if stat in ["Min", "Typ", "Max"] and temp is not None:
+            # 从该列上方所有表头信息里识别 FE / RE
+            header_text = " ".join([
+                normalize_text(df.iloc[rr, c])
+                for rr in range(0, stat_row_idx + 1)
+            ])
+
+             edge = detect_edge_from_text(header_text)
+
+             value_infos.append({
+                 "col": c,
+                 "temp": temp,
+                 "stat": stat,
+                 "edge": edge,
+             })
+  
+    if not value_infos:
+         print(f"[跳过] {lot_name}：没有识别到有效温度数据列。")
+         return pd.DataFrame()
+
+    first_value_col = min([x["col"] for x in value_infos])
 
     records = []
 
@@ -725,24 +776,32 @@ def read_lot_index(file_path):
                 unit = cell
                 break
 
-        for c in value_cols:
-            temp = parse_temp(temp_row.iloc[c])
-            stat = clean_stat(stat_row.iloc[c])
+        for info in value_infos:
+            c = info["col"]
+            temp = info["temp"]
+            stat = info["stat"]
+            edge = info["edge"]
+
             value = to_number(df.iloc[r, c])
 
             if temp is None or not stat or pd.isna(value):
                 continue
+ 
+            # 如果行测试条件里也有 FE / RE，优先用行里的
+            row_edge = detect_edge_from_text(test_condition)
+            final_edge = row_edge if row_edge else edge
 
             records.append({
-                "Lot": lot_name,
-                "Parameter": parameter,
-                "Test_Condition": test_condition,
-                "Unit_From_Lot": unit,
-                "Temp": temp,
-                "Stat": stat,
-                "Value": value,
-                "Source_File": os.path.basename(file_path),
-            })
+                 "Lot": lot_name,
+                 "Parameter": parameter,
+                 "Test_Condition": test_condition,
+                 "Edge": final_edge,
+                 "Unit_From_Lot": unit,
+                 "Temp": temp,
+                 "Stat": stat,
+                 "Value": value,
+                 "Source_File": os.path.basename(file_path),
+             })
 
     lot_df = pd.DataFrame(records)
 
@@ -974,6 +1033,83 @@ def apply_assign_info(row_dict, parameter, assign_df):
 
     return row_dict, assign_parameter
 
+def get_use_edge_from_assign(parameter, spec_type, assign_df):
+    """
+    从 assign_standard.xlsx 获取 Use_Edge。
+    如果没有填写，则返回 ALL。
+    """
+    assign_row = match_one_row(parameter, spec_type, assign_df)
+
+    if assign_row is None:
+        return "ALL"
+
+    use_edge = normalize_text(assign_row.get("Use_Edge", "")).upper()
+
+    if use_edge in ["FE", "RE", "IGNORE"]:
+        return use_edge
+
+    return "ALL"
+
+
+def has_fe_re_target(parameter, target_df):
+    """
+    判断目标规格表中这个参数是否存在 FE / RE 两种边沿。
+    如果有 FE/RE，默认优先取 FE。
+    """
+    matched = get_best_match_rows(parameter, target_df)
+
+    if matched.empty or "Spec_Type" not in matched.columns:
+        return False
+
+    spec_values = matched["Spec_Type"].astype(str).str.upper().str.strip().tolist()
+
+    return ("FE" in spec_values) or ("RE" in spec_values)
+
+
+def get_preferred_edge(parameter, spec_type, assign_df, target_df):
+    """
+    决定当前参数取哪个边沿：
+    1. assign_standard.xlsx 的 Use_Edge 优先
+    2. 如果目标规格表有 FE / RE，则默认取 FE
+    3. 其他参数取 ALL
+    """
+    use_edge = get_use_edge_from_assign(parameter, spec_type, assign_df)
+
+    if use_edge in ["FE", "RE", "IGNORE"]:
+        return use_edge
+
+    if has_fe_re_target(parameter, target_df):
+        return "FE"
+
+    return "ALL"
+
+
+def filter_raw_by_edge(param_df, preferred_edge):
+    """
+    根据 FE / RE 过滤 Raw 数据。
+    """
+    if preferred_edge == "ALL":
+        return param_df
+
+    if preferred_edge == "IGNORE":
+        return param_df.iloc[0:0].copy()
+
+    if param_df.empty:
+        return param_df
+
+    if "Edge" not in param_df.columns:
+        return param_df
+
+    df = param_df.copy()
+
+    # 如果识别到了 FE/RE，只保留指定边沿
+    edge_mask = df["Edge"].astype(str).str.upper().str.strip() == preferred_edge
+
+    if edge_mask.any():
+        return df[edge_mask].copy()
+
+    # 如果完全没有识别到边沿，则不强行清空，避免误删
+    return df
 
 def apply_target_info(row_dict, parameter, target_df):
     target_row = match_one_row(parameter, row_dict.get("Spec_Type", ""), target_df)
@@ -1102,7 +1238,10 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             rule = "AUTO_MAX*1.2"
             row_dict["Assign_Rule"] = rule
 
+        preferred_edge = get_preferred_edge(parameter, spec_type, assign_df, target_df)
+
         param_df = raw_df[raw_df["Parameter"] == parameter]
+        param_df = filter_raw_by_edge(param_df, preferred_edge)
 
         side = infer_side(parameter, spec_type, rule)
         factor = parse_margin_factor(rule)
