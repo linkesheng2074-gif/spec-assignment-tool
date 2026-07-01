@@ -1503,17 +1503,6 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             target_risk_130
         ])
 
-        target_spec_type = normalize_text(row_dict.get("Target_Spec_Type", ""))
-        sim_spec_type = normalize_text(sim_info.get("Sim_Spec_Type", ""))
-
-        spec_type_mismatch = (
-            bool(target_parameter)
-            and bool(sim_info.get("Sim_Parameter", ""))
-            and bool(target_spec_type)
-            and bool(sim_spec_type)
-            and target_spec_type.upper() != sim_spec_type.upper()
-        )
-
         typ_defined = has_typ_definition(parameter, assign_df, target_df, sim_df)
         suggest_typ_output = suggest_typ if typ_defined else np.nan
 
@@ -1558,6 +1547,10 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             "Suggest_Spec_UpTo110C": format_suggest_value(suggest_110, row_dict["Unit"]),
             "Suggest_Spec_UpTo130C": format_suggest_value(suggest_130, row_dict["Unit"]),
 
+            # 分温度段 Target 风险；同时保留 Target_Risk 作为整行汇总风险。
+            "Target_Risk_UpTo90C": target_risk_90[0],
+            "Target_Risk_UpTo110C": target_risk_110[0],
+            "Target_Risk_UpTo130C": target_risk_130[0],
             "Target_Risk": target_risk,
             "Target_Risk_Reason": target_risk_reason,
 
@@ -1571,7 +1564,6 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             "Sim_Risk": sim_risk,
             "Sim_Risk_Reason": sim_risk_reason,
 
-            "Spec_Type_Mismatch": "Y" if spec_type_mismatch else "",
             "Assign_Parameter": assign_parameter,
             "Target_Parameter": target_parameter,
         })
@@ -1709,14 +1701,6 @@ def export_excel(
             "align": "center",
         })
 
-        spec_type_mismatch_fmt = workbook.add_format({
-            "bg_color": "#F4CCCC",
-            "font_color": "#990000",
-            "bold": True,
-            "border": 1,
-            "align": "center",
-        })
-
         sheets = {
             "Summary": final_df,
             "Raw_Long": raw_df,
@@ -1744,64 +1728,91 @@ def export_excel(
             ws.set_column(21, 40, 22)
             ws.set_column(41, 300, 18)
 
-            if "Spec_Type_Mismatch" in df_sheet.columns:
-                mismatch_col = df_sheet.columns.get_loc("Spec_Type_Mismatch")
-                ws.set_column(mismatch_col, mismatch_col, None, None, {"hidden": True})
-
         ws = writer.sheets["Summary"]
 
-        for risk_col_name in ["Target_Risk", "Sim_Risk"]:
+        def _excel_col_name(col_idx):
+            name = ""
+            col_idx += 1
+            while col_idx:
+                col_idx, rem = divmod(col_idx - 1, 26)
+                name = chr(65 + rem) + name
+            return name
+
+        def apply_text_risk_format(ws, col_idx, last_row):
+            ws.conditional_format(1, col_idx, last_row, col_idx, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "High",
+                "format": high_fmt,
+            })
+            ws.conditional_format(1, col_idx, last_row, col_idx, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "Medium",
+                "format": medium_fmt,
+            })
+            ws.conditional_format(1, col_idx, last_row, col_idx, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "Low",
+                "format": low_fmt,
+            })
+            ws.conditional_format(1, col_idx, last_row, col_idx, {
+                "type": "text",
+                "criteria": "containing",
+                "value": "Review",
+                "format": review_fmt,
+            })
+
+        last_row = len(final_df)
+
+        # 对风险列本身着色。Target_Risk 是整行汇总，Target_Risk_UpTo* 是分温度段风险。
+        risk_col_names = [
+            "Target_Risk_UpTo90C",
+            "Target_Risk_UpTo110C",
+            "Target_Risk_UpTo130C",
+            "Target_Risk",
+            "Sim_Risk",
+        ]
+
+        for risk_col_name in risk_col_names:
             if risk_col_name in final_df.columns:
-                risk_col = final_df.columns.get_loc(risk_col_name)
-                last_row = len(final_df)
+                apply_text_risk_format(ws, final_df.columns.get_loc(risk_col_name), last_row)
 
-                ws.conditional_format(1, risk_col, last_row, risk_col, {
-                    "type": "text",
-                    "criteria": "containing",
-                    "value": "High",
-                    "format": high_fmt,
-                })
+        # 对 Suggest_Spec 三列按对应温度段 Target_Risk 着色，便于直接看到每个建议规格的风险。
+        suggest_risk_pairs = [
+            ("Suggest_Spec_UpTo90C", "Target_Risk_UpTo90C"),
+            ("Suggest_Spec_UpTo110C", "Target_Risk_UpTo110C"),
+            ("Suggest_Spec_UpTo130C", "Target_Risk_UpTo130C"),
+        ]
 
-                ws.conditional_format(1, risk_col, last_row, risk_col, {
-                    "type": "text",
-                    "criteria": "containing",
-                    "value": "Medium",
-                    "format": medium_fmt,
-                })
+        for suggest_col_name, risk_col_name in suggest_risk_pairs:
+            if suggest_col_name not in final_df.columns or risk_col_name not in final_df.columns:
+                continue
 
-                ws.conditional_format(1, risk_col, last_row, risk_col, {
-                    "type": "text",
-                    "criteria": "containing",
-                    "value": "Low",
-                    "format": low_fmt,
-                })
+            suggest_col = final_df.columns.get_loc(suggest_col_name)
+            risk_col = final_df.columns.get_loc(risk_col_name)
+            risk_col_letter = _excel_col_name(risk_col)
 
-                ws.conditional_format(1, risk_col, last_row, risk_col, {
-                    "type": "text",
-                    "criteria": "containing",
-                    "value": "Review",
-                    "format": review_fmt,
-                })
-
-        if "Spec_Type" in final_df.columns and "Spec_Type_Mismatch" in final_df.columns:
-            spec_col = final_df.columns.get_loc("Spec_Type")
-            mismatch_col = final_df.columns.get_loc("Spec_Type_Mismatch")
-            last_row = len(final_df)
-
-            def _excel_col_name(col_idx):
-                name = ""
-                col_idx += 1
-                while col_idx:
-                    col_idx, rem = divmod(col_idx - 1, 26)
-                    name = chr(65 + rem) + name
-                return name
-
-            mismatch_col_name = _excel_col_name(mismatch_col)
-
-            ws.conditional_format(1, spec_col, last_row, spec_col, {
+            ws.conditional_format(1, suggest_col, last_row, suggest_col, {
                 "type": "formula",
-                "criteria": f'=${mismatch_col_name}2="Y"',
-                "format": spec_type_mismatch_fmt,
+                "criteria": f'=${risk_col_letter}2="High"',
+                "format": high_fmt,
+            })
+            ws.conditional_format(1, suggest_col, last_row, suggest_col, {
+                "type": "formula",
+                "criteria": f'=${risk_col_letter}2="Medium"',
+                "format": medium_fmt,
+            })
+            ws.conditional_format(1, suggest_col, last_row, suggest_col, {
+                "type": "formula",
+                "criteria": f'=${risk_col_letter}2="Low"',
+                "format": low_fmt,
+            })
+            ws.conditional_format(1, suggest_col, last_row, suggest_col, {
+                "type": "formula",
+                "criteria": f'=${risk_col_letter}2="Review"',
+                "format": review_fmt,
             })
 
     print("Excel 输出完成：", output_file)
