@@ -539,6 +539,52 @@ def match_one_row(actual_parameter, spec_type, df):
 
     return matched.iloc[0]
 
+
+def is_typ_spec_value(x):
+    spec = normalize_text(x).lower()
+    return spec in ["typ", "type", "avg", "mean", "典型", "典型值"]
+
+
+def has_typ_definition(parameter, assign_df, target_df, sim_df):
+    """
+    判断该参数是否在赋值标准 / 目标规格 / 仿真值中定义了 typ。
+    如果三份文件都没有 typ 定义，则 Suggest_Typ_25C 留空。
+    """
+    for df in [assign_df, target_df, sim_df]:
+        matched = get_best_match_rows(parameter, df)
+
+        if matched.empty:
+            continue
+
+        if "Spec_Type" in matched.columns:
+            if matched["Spec_Type"].apply(is_typ_spec_value).any():
+                return True
+
+        if "Sim_Typ_25C" in matched.columns:
+            sim_typ_values = matched["Sim_Typ_25C"].apply(to_number)
+            if sim_typ_values.notna().any():
+                return True
+
+    return False
+
+
+def is_mhz_unit(unit):
+    return normalize_text(unit).replace(" ", "").upper() == "MHZ"
+
+
+def format_suggest_value(value, unit):
+    """MHz 单位的 Suggest 输出取整，其余按默认小数位。"""
+    if pd.isna(value):
+        return ""
+
+    if is_mhz_unit(unit):
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return ""
+
+    return round_value(value)
+
 # ============================================================
 # 7. 读取汇总模板
 # ============================================================
@@ -986,26 +1032,87 @@ def calc_delta_percent(test_value, sim_value):
     return (test_value - sim_value) / abs(sim_value)
 
 
-def judge_target_risk_one(side, suggest_value, target_value, temp_label):
-    if pd.isna(suggest_value) or pd.isna(target_value):
-        return "Review", f"{temp_label} 缺少建议值或目标规格"
+def judge_target_risk_one(side, test_worst, suggest_value, target_value, sim_value, temp_label):
+    """
+    Target_Risk 评估逻辑：
+    - 使用 Suggest_Spec、Test_Worst 与 limit 对比。
+    - limit = Worst(目标规格, 仿真值)：
+      * max 类型：目标规格/仿真值中取较大的值作为 limit。
+      * min 类型：目标规格/仿真值中取较小的值作为 limit。
+    - 目标规格为空则忽略目标规格，仿真值为空则忽略仿真值。
+    - 两者都为空，该温度段返回 Review。
+
+    max 类型：
+      limit > Suggest_Spec                 -> Low
+      Suggest_Spec > limit >= Test_Worst   -> Medium
+      limit < Test_Worst                   -> High
+
+    min 类型：
+      limit < Suggest_Spec                 -> Low
+      Suggest_Spec > limit >= Test_Worst   -> Medium
+      limit > Test_Worst                   -> High
+    """
+    if pd.isna(test_worst) and pd.isna(suggest_value):
+        return "Review", f"{temp_label} 缺少测试最差值和建议规格值"
+
+    if pd.isna(suggest_value):
+        return "Review", f"{temp_label} 缺少建议规格值"
+
+    if pd.isna(test_worst):
+        return "Review", f"{temp_label} 缺少测试最差值"
+
+    limits = []
+
+    if not pd.isna(target_value):
+        limits.append(("目标规格", target_value))
+
+    if not pd.isna(sim_value):
+        limits.append(("仿真值", sim_value))
+
+    if not limits:
+        return "Review", f"{temp_label} 目标规格和仿真值均为空，跳过风险判断"
 
     if side == "max":
-        if suggest_value > target_value:
-            return "High", f"{temp_label} 建议值 {round_value(suggest_value)} > 目标规格 {round_value(target_value)}"
-        if suggest_value > target_value * 0.9:
-            return "Medium", f"{temp_label} 建议值 {round_value(suggest_value)} 接近目标规格 {round_value(target_value)}"
-        return "Low", f"{temp_label} 建议值 {round_value(suggest_value)} 满足目标规格 {round_value(target_value)}"
+        limit_label, limit = max(limits, key=lambda x: x[1])
+
+        if limit < test_worst:
+            return (
+                "High",
+                f"{temp_label} limit({limit_label}) {round_value(limit)} < Test_Worst {round_value(test_worst)}"
+            )
+
+        if suggest_value > limit >= test_worst:
+            return (
+                "Medium",
+                f"{temp_label} Suggest_Spec {round_value(suggest_value)} > limit({limit_label}) {round_value(limit)} >= Test_Worst {round_value(test_worst)}"
+            )
+
+        return (
+            "Low",
+            f"{temp_label} limit({limit_label}) {round_value(limit)} > Suggest_Spec {round_value(suggest_value)}"
+        )
 
     if side == "min":
-        if suggest_value < target_value:
-            return "High", f"{temp_label} 建议值 {round_value(suggest_value)} < 目标规格 {round_value(target_value)}"
-        if suggest_value < target_value * 1.1:
-            return "Medium", f"{temp_label} 建议值 {round_value(suggest_value)} 接近目标规格 {round_value(target_value)}"
-        return "Low", f"{temp_label} 建议值 {round_value(suggest_value)} 满足目标规格 {round_value(target_value)}"
+        limit_label, limit = min(limits, key=lambda x: x[1])
+
+        if limit > test_worst:
+            return (
+                "High",
+                f"{temp_label} limit({limit_label}) {round_value(limit)} > Test_Worst {round_value(test_worst)}"
+            )
+
+        if suggest_value > limit >= test_worst:
+            return (
+                "Medium",
+                f"{temp_label} Suggest_Spec {round_value(suggest_value)} > limit({limit_label}) {round_value(limit)} >= Test_Worst {round_value(test_worst)}"
+            )
+
+        return (
+            "Low",
+            f"{temp_label} limit({limit_label}) {round_value(limit)} < Suggest_Spec {round_value(suggest_value)}"
+        )
 
     return "Review", f"{temp_label} Typ/Avg 类型暂不做目标规格风险判定"
-
 
 def judge_sim_risk_one(side, test_value, sim_value, temp_label):
     if pd.isna(test_value) or pd.isna(sim_value):
@@ -1158,18 +1265,56 @@ def filter_raw_by_edge(param_df, preferred_edge):
     # 如果完全没有识别到边沿，则不强行清空，避免误删
     return df
 
+def select_target_row(parameter, spec_type, target_df):
+    """
+    目标规格行选择逻辑：
+    1. 如果目标规格里有与当前 Spec_Type 完全一致的行，优先取该行。
+    2. 如果目标规格存在 FE/RE 两种边沿，默认优先取 FE 行。
+    3. 其他情况取第一条匹配行。
+    """
+    matched = get_best_match_rows(parameter, target_df)
+
+    if matched.empty:
+        return None
+
+    spec_type_key = normalize_text(spec_type).lower()
+
+    if spec_type_key and "Spec_Type" in matched.columns:
+        same_type = matched[
+            matched["Spec_Type"].astype(str).str.lower().str.strip() == spec_type_key
+        ]
+
+        if not same_type.empty:
+            return same_type.iloc[0]
+
+    if "Spec_Type" in matched.columns:
+        fe_rows = matched[matched["Spec_Type"].astype(str).str.upper().str.strip() == "FE"]
+
+        if not fe_rows.empty:
+            return fe_rows.iloc[0]
+
+    return matched.iloc[0]
+
+
 def apply_target_info(row_dict, parameter, target_df):
-    target_row = match_one_row(parameter, row_dict.get("Spec_Type", ""), target_df)
+    target_row = select_target_row(parameter, row_dict.get("Spec_Type", ""), target_df)
 
     target_parameter = ""
+    target_spec_type = ""
 
     if target_row is None:
+        row_dict["Target_Spec_Type"] = ""
         return row_dict, target_parameter
 
     target_parameter = target_row.get("Base_Parameter", "")
+    target_spec_type = normalize_text(target_row.get("Spec_Type", ""))
 
-    if not normalize_text(row_dict.get("Spec_Type", "")):
-        row_dict["Spec_Type"] = target_row.get("Spec_Type", "")
+    # 目标规格中的 Spec_Type 优先级最高。
+    # 如果目标规格有定义 Spec_Type，则覆盖模板/赋值标准中的 Spec_Type。
+    if target_spec_type:
+        row_dict["Spec_Type"] = target_spec_type
+
+    row_dict["Target_Spec_Type"] = target_spec_type
 
     if not pd.isna(to_number(target_row.get("Target_90C", np.nan))):
         row_dict["Target_90C"] = to_number(target_row.get("Target_90C"))
@@ -1192,6 +1337,7 @@ def get_sim_info(parameter, spec_type, sim_df):
     if sim_row is None:
         return {
             "Sim_Parameter": "",
+            "Sim_Spec_Type": "",
             "Sim_Typ_25C": np.nan,
             "Sim_Worst_90C": np.nan,
             "Sim_Worst_110C": np.nan,
@@ -1200,6 +1346,7 @@ def get_sim_info(parameter, spec_type, sim_df):
 
     return {
         "Sim_Parameter": sim_row.get("Base_Parameter", ""),
+        "Sim_Spec_Type": normalize_text(sim_row.get("Spec_Type", "")),
         "Sim_Typ_25C": to_number(sim_row.get("Sim_Typ_25C", np.nan)),
         "Sim_Worst_90C": to_number(sim_row.get("Sim_Worst_90C", np.nan)),
         "Sim_Worst_110C": to_number(sim_row.get("Sim_Worst_110C", np.nan)),
@@ -1304,16 +1451,6 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
         suggest_110 = suggest_spec(worst_110, side, factor)
         suggest_130 = suggest_spec(worst_130, side, factor)
 
-        target_risk_90 = judge_target_risk_one(side, suggest_90, row_dict["Target_90C"], "UpTo90C")
-        target_risk_110 = judge_target_risk_one(side, suggest_110, row_dict["Target_110C"], "UpTo110C")
-        target_risk_130 = judge_target_risk_one(side, suggest_130, row_dict["Target_130C"], "UpTo130C")
-
-        target_risk, target_risk_reason = combine_risk([
-            target_risk_90,
-            target_risk_110,
-            target_risk_130
-        ])
-
         sim_info = get_sim_info(parameter, spec_type, sim_df)
 
         sim_typ = sim_info["Sim_Typ_25C"]
@@ -1334,6 +1471,51 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
 
         if pd.isna(simulated_130):
             simulated_130 = row_dict.get("Simulated_130C", np.nan)
+
+        target_risk_90 = judge_target_risk_one(
+            side,
+            worst_90,
+            suggest_90,
+            row_dict["Target_90C"],
+            simulated_90,
+            "UpTo90C"
+        )
+        target_risk_110 = judge_target_risk_one(
+            side,
+            worst_110,
+            suggest_110,
+            row_dict["Target_110C"],
+            simulated_110,
+            "UpTo110C"
+        )
+        target_risk_130 = judge_target_risk_one(
+            side,
+            worst_130,
+            suggest_130,
+            row_dict["Target_130C"],
+            simulated_130,
+            "UpTo130C"
+        )
+
+        target_risk, target_risk_reason = combine_risk([
+            target_risk_90,
+            target_risk_110,
+            target_risk_130
+        ])
+
+        target_spec_type = normalize_text(row_dict.get("Target_Spec_Type", ""))
+        sim_spec_type = normalize_text(sim_info.get("Sim_Spec_Type", ""))
+
+        spec_type_mismatch = (
+            bool(target_parameter)
+            and bool(sim_info.get("Sim_Parameter", ""))
+            and bool(target_spec_type)
+            and bool(sim_spec_type)
+            and target_spec_type.upper() != sim_spec_type.upper()
+        )
+
+        typ_defined = has_typ_definition(parameter, assign_df, target_df, sim_df)
+        suggest_typ_output = suggest_typ if typ_defined else np.nan
 
         delta_typ = calc_delta_percent(avg_25, sim_typ)
         delta_90 = calc_delta_percent(worst_90, sim_90)
@@ -1371,10 +1553,10 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             "Test_Worst_UpTo110C": round_value(worst_110),
             "Test_Worst_UpTo130C": round_value(worst_130),
 
-            "Suggest_Typ_25C": round_value(suggest_typ),
-            "Suggest_Spec_UpTo90C": round_value(suggest_90),
-            "Suggest_Spec_UpTo110C": round_value(suggest_110),
-            "Suggest_Spec_UpTo130C": round_value(suggest_130),
+            "Suggest_Typ_25C": format_suggest_value(suggest_typ_output, row_dict["Unit"]),
+            "Suggest_Spec_UpTo90C": format_suggest_value(suggest_90, row_dict["Unit"]),
+            "Suggest_Spec_UpTo110C": format_suggest_value(suggest_110, row_dict["Unit"]),
+            "Suggest_Spec_UpTo130C": format_suggest_value(suggest_130, row_dict["Unit"]),
 
             "Target_Risk": target_risk,
             "Target_Risk_Reason": target_risk_reason,
@@ -1389,6 +1571,7 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             "Sim_Risk": sim_risk,
             "Sim_Risk_Reason": sim_risk_reason,
 
+            "Spec_Type_Mismatch": "Y" if spec_type_mismatch else "",
             "Assign_Parameter": assign_parameter,
             "Target_Parameter": target_parameter,
         })
@@ -1526,6 +1709,14 @@ def export_excel(
             "align": "center",
         })
 
+        spec_type_mismatch_fmt = workbook.add_format({
+            "bg_color": "#F4CCCC",
+            "font_color": "#990000",
+            "bold": True,
+            "border": 1,
+            "align": "center",
+        })
+
         sheets = {
             "Summary": final_df,
             "Raw_Long": raw_df,
@@ -1552,6 +1743,10 @@ def export_excel(
             ws.set_column(9, 20, 20)
             ws.set_column(21, 40, 22)
             ws.set_column(41, 300, 18)
+
+            if "Spec_Type_Mismatch" in df_sheet.columns:
+                mismatch_col = df_sheet.columns.get_loc("Spec_Type_Mismatch")
+                ws.set_column(mismatch_col, mismatch_col, None, None, {"hidden": True})
 
         ws = writer.sheets["Summary"]
 
@@ -1587,6 +1782,27 @@ def export_excel(
                     "value": "Review",
                     "format": review_fmt,
                 })
+
+        if "Spec_Type" in final_df.columns and "Spec_Type_Mismatch" in final_df.columns:
+            spec_col = final_df.columns.get_loc("Spec_Type")
+            mismatch_col = final_df.columns.get_loc("Spec_Type_Mismatch")
+            last_row = len(final_df)
+
+            def _excel_col_name(col_idx):
+                name = ""
+                col_idx += 1
+                while col_idx:
+                    col_idx, rem = divmod(col_idx - 1, 26)
+                    name = chr(65 + rem) + name
+                return name
+
+            mismatch_col_name = _excel_col_name(mismatch_col)
+
+            ws.conditional_format(1, spec_col, last_row, spec_col, {
+                "type": "formula",
+                "criteria": f'=${mismatch_col_name}2="Y"',
+                "format": spec_type_mismatch_fmt,
+            })
 
     print("Excel 输出完成：", output_file)
 
