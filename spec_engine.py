@@ -718,15 +718,6 @@ def read_lot_index(file_path):
     temp_row = df.iloc[temp_row_idx].copy().ffill()
     stat_row = df.iloc[stat_row_idx].copy()
 
-    value_cols = []
-
-    for c in range(df.shape[1]):
-        stat = clean_stat(stat_row.iloc[c])
-        temp = parse_temp(temp_row.iloc[c])
-
-        if stat in ["Min", "Typ", "Max"] and temp is not None:
-            value_cols.append(c)
-
     value_infos = []
 
     for c in range(df.shape[1]):
@@ -754,11 +745,45 @@ def read_lot_index(file_path):
          return pd.DataFrame()
 
     first_value_col = min([x["col"] for x in value_infos])
+    # 识别 Edge 列，一般表头为 Edge / Edge.
+    edge_col = None
 
+    for c in range(0, first_value_col):
+        header_text = " ".join([
+            normalize_text(df.iloc[rr, c])
+            for rr in range(0, stat_row_idx + 1)
+        ])
+
+        header_key = clean_column_name(header_text)
+
+        if "EDGE" in header_key or "边沿" in header_text:
+            edge_col = c
+            break
+
+    if edge_col is not None:
+        print(f"{lot_name} 识别到 Edge 列：第 {edge_col + 1} 列")
+    else:
+        print(f"{lot_name} 未识别到 Edge 列，将尝试从行描述中识别 FE/RE")
+        
     records = []
+    last_parameter = ""
 
     for r in range(stat_row_idx + 1, len(df)):
-        parameter = normalize_text(df.iloc[r, 0])
+        raw_parameter = normalize_text(df.iloc[r, 0])
+
+        # 当前行 Edge 列的值，例如 RE / FE
+        edge_cell = ""
+        if edge_col is not None:
+            edge_cell = normalize_text(df.iloc[r, edge_col])
+
+        edge_from_edge_col = detect_edge_from_text(edge_cell)
+
+        # 如果当前行 A列有参数名，则更新 last_parameter
+        if raw_parameter and raw_parameter.lower() not in ["symbol", "parameter", "参数", "test item", "item"]:
+            last_parameter = raw_parameter
+
+        # 如果当前行 A列为空，但是 Edge 列有 FE/RE，则沿用上一行参数名
+        parameter = raw_parameter if raw_parameter else last_parameter
 
         if not parameter:
             continue
@@ -766,7 +791,18 @@ def read_lot_index(file_path):
         if parameter.lower() in ["symbol", "parameter", "参数", "test item", "item"]:
             continue
 
-        test_condition = normalize_text(df.iloc[r, 2]) if df.shape[1] > 2 else ""
+        # 从当前行左侧信息中读取测试条件
+        row_meta_cells = []
+
+        for cc in range(0, first_value_col):
+            row_meta_cells.append(normalize_text(df.iloc[r, cc]))
+
+        row_meta_text = " ".join(row_meta_cells)
+
+        test_condition = normalize_text(df.iloc[r, 2]) if df.shape[1] > 2 else row_meta_text
+
+        # FE/RE 优先从 Edge 列读取
+        row_edge = edge_from_edge_col if edge_from_edge_col else detect_edge_from_text(row_meta_text)
 
         unit = ""
 
@@ -788,8 +824,19 @@ def read_lot_index(file_path):
                 continue
  
             # 如果行测试条件里也有 FE / RE，优先用行里的
-            row_edge = detect_edge_from_text(test_condition)
-            final_edge = row_edge if row_edge else edge
+            condition_edge = detect_edge_from_text(test_condition)
+            parameter_edge = detect_edge_from_text(parameter)
+
+            if edge_from_edge_col:
+                final_edge = edge_from_edge_col
+            elif parameter_edge:
+                final_edge = parameter_edge
+            elif row_edge:
+                final_edge = row_edge
+            elif condition_edge:
+                final_edge = condition_edge
+            else:
+                final_edge = edge
 
             records.append({
                  "Lot": lot_name,
