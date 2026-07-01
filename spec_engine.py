@@ -740,14 +740,14 @@ def read_lot_index(file_path):
                 for rr in range(0, stat_row_idx + 1)
             ])
 
-             edge = detect_edge_from_text(header_text)
+            edge = detect_edge_from_text(header_text)
 
-             value_infos.append({
+            value_infos.append({
                  "col": c,
                  "temp": temp,
                  "stat": stat,
                  "edge": edge,
-             })
+            })
   
     if not value_infos:
          print(f"[跳过] {lot_name}：没有识别到有效温度数据列。")
