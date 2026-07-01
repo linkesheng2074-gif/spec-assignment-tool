@@ -180,6 +180,64 @@ def get_first_underscore_base_key(parameter):
         return actual_key.split("_")[0]
 
     return actual_key
+def get_icc3_freq_base_key(parameter):
+    """
+    专门处理 ICC3_xIO_DRV00_xxMHz 这类参数。
+
+    例子：
+    ICC3_1IO_DRV00_80Mhz  -> ICC3_80MHZ
+    ICC3_2IO_DRV00_114Mhz -> ICC3_114MHZ
+    ICC3_4IO_DRV00_133Mhz -> ICC3_133MHZ
+
+    这样可以匹配目标规格表里的：
+    ICC3_80MHz
+    ICC3_114MHz
+    ICC3_133MHz
+    """
+    actual_key = normalize_param_for_match(parameter)
+
+    if not actual_key.startswith("ICC3_"):
+        return ""
+
+    m = re.search(r"(80|100|104|108|114|120|133)\s*MHZ", actual_key, re.IGNORECASE)
+
+    if not m:
+        return ""
+
+    freq = m.group(1)
+
+    return normalize_param_for_match(f"ICC3_{freq}MHz")
+
+
+def get_candidate_match_keys(parameter):
+    """
+    为一个实际测试参数生成多个可能的匹配 Key。
+    匹配顺序很重要：越精确的放越前面。
+    """
+    actual_key = normalize_param_for_match(parameter)
+
+    keys = []
+
+    # 1. 完整参数
+    keys.append(actual_key)
+
+    # 2. ICC3 特殊规则：ICC3_4IO_DRV00_80Mhz -> ICC3_80MHz
+    icc3_key = get_icc3_freq_base_key(parameter)
+    if icc3_key:
+        keys.append(icc3_key)
+
+    # 3. 第一个 "_" 前面的基础参数
+    first_base_key = get_first_underscore_base_key(parameter)
+    if first_base_key:
+        keys.append(first_base_key)
+
+    # 去重但保持顺序
+    result = []
+    for k in keys:
+        if k and k not in result:
+            result.append(k)
+
+    return result
 # ============================================================
 # 3. 读取赋值标准文件
 # ============================================================
@@ -381,37 +439,33 @@ def get_best_match_rows(actual_parameter, df):
     """
     参数匹配优先级：
 
-    1. 精确匹配实际测试参数
-       tSLCH_DRV10 -> tSLCH_DRV10
+    1. 精确匹配完整参数
+       ICC3_4IO_DRV00_80MHz -> ICC3_4IO_DRV00_80MHz
 
-    2. 匹配第一个 "_" 前面的基础参数
+    2. 特殊规则匹配
+       ICC3_4IO_DRV00_80MHz -> ICC3_80MHz
+
+    3. 第一个 "_" 前基础参数
        tSLCH_DRV10 -> tSLCH
-       ICC3_1IO_DRV00_133MHz -> ICC3
 
-    3. 最长前缀匹配
-       用于兼容少数特殊命名
+    4. 最长前缀匹配
     """
 
     if df is None or df.empty:
         return pd.DataFrame()
 
     actual_key = normalize_param_for_match(actual_parameter)
-    base_key_from_underscore = get_first_underscore_base_key(actual_parameter)
 
-    # 1. 精确匹配完整测试参数
-    exact = df[df["Base_Key"] == actual_key]
+    # 1/2/3. 按候选 Key 顺序精确匹配
+    candidate_keys = get_candidate_match_keys(actual_parameter)
 
-    if not exact.empty:
-        return exact.copy()
+    for key in candidate_keys:
+        exact = df[df["Base_Key"] == key]
 
-    # 2. 匹配第一个 "_" 前面的基础参数
-    # 例如 tSLCH_DRV10 -> tSLCH
-    base_exact = df[df["Base_Key"] == base_key_from_underscore]
+        if not exact.empty:
+            return exact.copy()
 
-    if not base_exact.empty:
-        return base_exact.copy()
-
-    # 3. 最长前缀匹配
+    # 4. 最长前缀匹配
     candidates = []
 
     for _, row in df.iterrows():
@@ -975,7 +1029,8 @@ def get_sim_info(parameter, spec_type, sim_df):
 # ============================================================
 
 def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
-    all_params_from_lots = sorted(raw_df["Parameter"].dropna().unique().tolist())
+    # 保持 Lot 原始参数顺序，不做 sorted 排序
+    all_params_from_lots = list(dict.fromkeys(raw_df["Parameter"].dropna().tolist()))
     all_params_from_template = template_df["Parameter"].dropna().unique().tolist()
 
     template_keys = set([normalize_param_for_match(p) for p in all_params_from_template])
