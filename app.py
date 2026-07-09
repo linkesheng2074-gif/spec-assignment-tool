@@ -92,18 +92,6 @@ def normalize_param_for_match(x):
     return s.upper()
 
 
-def normalize_param_exact_for_match(x):
-    """
-    保留电压后缀的匹配 Key。
-    例：ILI_1.65V-2.3V -> ILI_1.65V_2.3V。
-    用于目标规格/仿真值中区分不同电压范围。
-    """
-    s = normalize_text(x)
-    s = s.replace(" ", "")
-    s = s.replace("-", "_")
-    return s.upper()
-
-
 def clean_column_name(x):
     s = normalize_text(x)
     s = s.replace(" ", "")
@@ -322,7 +310,6 @@ def read_assign_standard(assign_file):
 
     df["Base_Parameter"] = df["Base_Parameter"].astype(str).str.strip()
     df["Base_Key"] = df["Base_Parameter"].apply(normalize_param_for_match)
-    df["Base_Key_Exact"] = df["Base_Parameter"].apply(normalize_param_exact_for_match)
 
     # Use_Edge 规则：
     # 空白 = ALL
@@ -338,237 +325,11 @@ def read_assign_standard(assign_file):
 
     return df
 
-
 # ============================================================
 # 4. 读取目标规格文件
 # ============================================================
 
-def add_match_keys(df):
-    """同时生成普通匹配 Key 和保留电压后缀的精确匹配 Key。"""
-    if df is None or df.empty:
-        return df
-
-    df["Base_Parameter"] = df["Base_Parameter"].astype(str).str.strip()
-    df["Base_Key"] = df["Base_Parameter"].apply(normalize_param_for_match)
-    df["Base_Key_Exact"] = df["Base_Parameter"].apply(normalize_param_exact_for_match)
-    return df
-
-
-def normalize_voltage_range(x):
-    """标准化电压范围文本：1.65V - 2.3V / 1.65V~2.3V -> 1.65V-2.3V。"""
-    return detect_voltage_range_from_text(x)
-
-
-def find_voltage_row(raw_df, header_row_idx, max_scan_rows=8):
-    """在目标规格/仿真值文件中寻找 Voltage 行。"""
-    start = header_row_idx + 1
-    end = min(len(raw_df), header_row_idx + 1 + max_scan_rows)
-
-    for r in range(start, end):
-        row_text = " ".join([normalize_text(v) for v in raw_df.iloc[r].tolist()])
-        has_voltage_word = "VOLTAGE" in row_text.upper() or "电压" in row_text
-        voltage_count = sum(
-            1 for v in raw_df.iloc[r].tolist()
-            if detect_voltage_range_from_text(v)
-        )
-
-        if has_voltage_word and voltage_count >= 1:
-            return r
-
-    return None
-
-
-def find_header_row(raw_df):
-    """寻找 Base_Parameter / Parameter / Symbol 表头行。"""
-    for r in range(min(20, len(raw_df))):
-        row_keys = [clean_column_name(v) for v in raw_df.iloc[r].tolist()]
-        if any(k in ["BASEPARAMETER", "PARAMETER", "SYMBOL", "基础参数", "标准参数", "参数"] for k in row_keys):
-            return r
-    return None
-
-
-def get_basic_columns_from_header(header_values):
-    """识别 Base_Parameter、Spec_Type、Unit 列。"""
-    result = {"base_col": None, "spec_col": None, "unit_col": None}
-
-    for c, value in enumerate(header_values):
-        key = clean_column_name(value)
-
-        if key in ["BASEPARAMETER", "PARAMETER", "SYMBOL", "基础参数", "标准参数", "参数"]:
-            result["base_col"] = c
-        elif key in ["SPECTYPE", "TYPE", "规格类型", "参数类型"]:
-            result["spec_col"] = c
-        elif key in ["UNIT", "单位"]:
-            result["unit_col"] = c
-
-    return result
-
-
-def classify_temp_column_for_wide_file(header_value, mode):
-    """识别宽表中的 25/90/110/130 温度列。"""
-    key = clean_column_name(header_value)
-
-    if mode == "target":
-        if key in ["TARGET90C", "TARGET90", "SPEC90C", "SPEC90", "90C", "90"] or "90" in key:
-            return "Target_90C"
-        if key in ["TARGET110C", "TARGET110", "SPEC110C", "SPEC110", "110C", "110"] or "110" in key:
-            return "Target_110C"
-        if key in ["TARGET130C", "TARGET130", "SPEC130C", "SPEC130", "130C", "130"] or "130" in key:
-            return "Target_130C"
-        return ""
-
-    if mode == "sim":
-        if "25" in key and ("TYP" in key or "AVG" in key or "SIM" in key):
-            return "Sim_Typ_25C"
-        if key in ["SIMWORST90C", "SIM90C", "SIMUPTO90C", "SIMULATED90C", "SIMULATED90", "90CSIM", "90C"] or "90" in key:
-            return "Sim_Worst_90C"
-        if key in ["SIMWORST110C", "SIM110C", "SIMUPTO110C", "SIMULATED110C", "SIMULATED110", "110CSIM", "110C"] or "110" in key:
-            return "Sim_Worst_110C"
-        if key in ["SIMWORST130C", "SIM130C", "SIMUPTO130C", "SIMULATED130C", "SIMULATED130", "130CSIM", "130C"] or "130" in key:
-            return "Sim_Worst_130C"
-        return ""
-
-    return ""
-
-
-def parse_voltage_wide_spec_file(file_path, mode):
-    """
-    读取横向电压分组格式的目标规格/仿真值文件。支持格式：
-
-    Base_Parameter | Spec_Type | Target_90C | Target_110C | Target_130C | Target_90C | ... | Unit
-    Voltage        |           | 1.65V-2.3V |              |              | 2.3V-3.6V | ... |
-
-    输出时自动把 Base_Parameter 转成：ILI_1.65V-2.3V、ILI_2.3V-3.6V。
-    """
-    raw = pd.read_excel(file_path, sheet_name=0, header=None)
-    header_row_idx = find_header_row(raw)
-
-    if header_row_idx is None:
-        return pd.DataFrame()
-
-    voltage_row_idx = find_voltage_row(raw, header_row_idx)
-
-    if voltage_row_idx is None:
-        return pd.DataFrame()
-
-    header_values = raw.iloc[header_row_idx].tolist()
-    voltage_values = raw.iloc[voltage_row_idx].tolist()
-    basic_cols = get_basic_columns_from_header(header_values)
-
-    base_col = basic_cols["base_col"]
-    spec_col = basic_cols["spec_col"]
-    unit_col = basic_cols["unit_col"]
-
-    if base_col is None:
-        return pd.DataFrame()
-
-    # 将电压行向右填充，兼容合并单元格。
-    voltage_by_col = []
-    current_voltage = ""
-
-    for value in voltage_values:
-        v = normalize_voltage_range(value)
-        if v:
-            current_voltage = v
-        voltage_by_col.append(current_voltage)
-
-    # 识别每个温度列属于哪个电压分组。
-    value_columns = []
-
-    for c, header_value in enumerate(header_values):
-        output_col = classify_temp_column_for_wide_file(header_value, mode)
-        voltage = voltage_by_col[c] if c < len(voltage_by_col) else ""
-
-        if output_col and voltage:
-            value_columns.append({
-                "col": c,
-                "voltage": voltage,
-                "output_col": output_col,
-            })
-
-    if not value_columns:
-        return pd.DataFrame()
-
-    rows = []
-    data_start = voltage_row_idx + 1
-
-    for r in range(data_start, len(raw)):
-        base_parameter = normalize_text(raw.iloc[r, base_col])
-
-        if not base_parameter:
-            continue
-
-        if clean_column_name(base_parameter) in ["VOLTAGE", "BASEPARAMETER", "PARAMETER", "SYMBOL"]:
-            continue
-
-        spec_type = normalize_text(raw.iloc[r, spec_col]) if spec_col is not None else ""
-        unit = normalize_text(raw.iloc[r, unit_col]) if unit_col is not None else ""
-
-        voltage_order = []
-        for info in value_columns:
-            if info["voltage"] not in voltage_order:
-                voltage_order.append(info["voltage"])
-
-        for voltage in voltage_order:
-            display_parameter = append_voltage_suffix(base_parameter, voltage)
-
-            if mode == "target":
-                row_dict = {
-                    "Base_Parameter": display_parameter,
-                    "Spec_Type": spec_type,
-                    "Target_90C": np.nan,
-                    "Target_110C": np.nan,
-                    "Target_130C": np.nan,
-                    "Unit": unit,
-                    "Remark": "",
-                }
-            else:
-                row_dict = {
-                    "Base_Parameter": display_parameter,
-                    "Spec_Type": spec_type,
-                    "Sim_Typ_25C": np.nan,
-                    "Sim_Worst_90C": np.nan,
-                    "Sim_Worst_110C": np.nan,
-                    "Sim_Worst_130C": np.nan,
-                    "Unit": unit,
-                    "Remark": "",
-                }
-
-            for info in value_columns:
-                if info["voltage"] != voltage:
-                    continue
-
-                value = to_number(raw.iloc[r, info["col"]])
-                row_dict[info["output_col"]] = value
-
-            # 如果仿真宽表没有 25C typ 列，但当前行是 typ，则用第一个非空仿真温度值作为 Sim_Typ_25C。
-            if mode == "sim" and pd.isna(row_dict.get("Sim_Typ_25C", np.nan)) and is_typ_spec_value(spec_type):
-                for col_name in ["Sim_Worst_90C", "Sim_Worst_110C", "Sim_Worst_130C"]:
-                    value = row_dict.get(col_name, np.nan)
-                    if not pd.isna(value):
-                        row_dict["Sim_Typ_25C"] = value
-                        break
-
-            numeric_cols = [c for c in row_dict.keys() if c.startswith("Target_") or c.startswith("Sim_")]
-            if any(not pd.isna(to_number(row_dict.get(c, np.nan))) for c in numeric_cols):
-                rows.append(row_dict)
-
-    result = pd.DataFrame(rows)
-
-    if result.empty:
-        return result
-
-    result = add_match_keys(result)
-    return result
-
-
 def read_target_spec(target_file):
-    wide_df = parse_voltage_wide_spec_file(target_file, mode="target")
-
-    if not wide_df.empty:
-        print("目标规格文件读取完成，识别到电压分组宽表格式，参数数量：", len(wide_df))
-        return wide_df
-
     df = pd.read_excel(target_file, sheet_name=0)
 
     col_map = {}
@@ -607,12 +368,14 @@ def read_target_spec(target_file):
             df[col] = ""
 
     df["Base_Parameter"] = df["Base_Parameter"].astype(str).str.strip()
+    df["Base_Key"] = df["Base_Parameter"].apply(normalize_param_for_match)
+
     df = df[df["Base_Parameter"] != ""].copy()
-    df = add_match_keys(df)
 
     print("目标规格文件读取完成，参数数量：", len(df))
 
     return df
+
 
 # ============================================================
 # 5. 读取仿真值文件
@@ -620,15 +383,10 @@ def read_target_spec(target_file):
 
 def read_sim_value(sim_file):
     """
-    支持两种仿真值格式：
-    1. 标准单表头格式：Base_Parameter | Spec_Type | Sim_Typ_25C | Sim_Worst_90C | ...
-    2. 与目标规格相同的电压分组宽表格式。
-    """
-    wide_df = parse_voltage_wide_spec_file(sim_file, mode="sim")
+    推荐仿真值文件表头：
 
-    if not wide_df.empty:
-        print("仿真值文件读取完成，识别到电压分组宽表格式，参数数量：", len(wide_df))
-        return wide_df
+    Base_Parameter | Spec_Type | Sim_Typ_25C | Sim_Worst_90C | Sim_Worst_110C | Sim_Worst_130C | Unit | Remark
+    """
 
     df = pd.read_excel(sim_file, sheet_name=0)
 
@@ -652,24 +410,21 @@ def read_sim_value(sim_file):
         elif key in [
             "SIMWORST90C", "SIM90C", "SIMUPTO90C", "90CSIM",
             "SIMULATED90C", "SIMULATED90", "90CSIMULATED",
-            "90C仿真", "仿真90C", "90度仿真", "SIMULATED_90C",
-            "TARGET90C", "SPEC90C", "90C", "90"
+            "90C仿真", "仿真90C", "90度仿真", "SIMULATED_90C"
         ]:
             col_map[col] = "Sim_Worst_90C"
 
         elif key in [
             "SIMWORST110C", "SIM110C", "SIMUPTO110C", "110CSIM",
             "SIMULATED110C", "SIMULATED110", "110CSIMULATED",
-            "110C仿真", "仿真110C", "110度仿真", "SIMULATED_110C",
-            "TARGET110C", "SPEC110C", "110C", "110"
+            "110C仿真", "仿真110C", "110度仿真", "SIMULATED_110C"
         ]:
             col_map[col] = "Sim_Worst_110C"
 
         elif key in [
             "SIMWORST130C", "SIM130C", "SIMUPTO130C", "130CSIM",
             "SIMULATED130C", "SIMULATED130", "130CSIMULATED",
-            "130C仿真", "仿真130C", "130度仿真", "SIMULATED_130C",
-            "TARGET130C", "SPEC130C", "130C", "130"
+            "130C仿真", "仿真130C", "130度仿真", "SIMULATED_130C"
         ]:
             col_map[col] = "Sim_Worst_130C"
 
@@ -697,23 +452,14 @@ def read_sim_value(sim_file):
             df[col] = ""
 
     df["Base_Parameter"] = df["Base_Parameter"].astype(str).str.strip()
+    df["Base_Key"] = df["Base_Parameter"].apply(normalize_param_for_match)
+
     df = df[df["Base_Parameter"] != ""].copy()
-
-    # 如果标准格式中没有 Sim_Typ_25C，但 typ 行有 90/110/130 值，则用第一个非空温度值作为 Sim_Typ_25C。
-    if "Spec_Type" in df.columns:
-        for idx, row in df.iterrows():
-            if pd.isna(to_number(row.get("Sim_Typ_25C", np.nan))) and is_typ_spec_value(row.get("Spec_Type", "")):
-                for col_name in ["Sim_Worst_90C", "Sim_Worst_110C", "Sim_Worst_130C"]:
-                    value = to_number(row.get(col_name, np.nan))
-                    if not pd.isna(value):
-                        df.at[idx, "Sim_Typ_25C"] = value
-                        break
-
-    df = add_match_keys(df)
 
     print("仿真值文件读取完成，参数数量：", len(df))
 
     return df
+
 
 # ============================================================
 # 6. 参数匹配函数
@@ -739,14 +485,6 @@ def get_best_match_rows(actual_parameter, df):
         return pd.DataFrame()
 
     actual_key = normalize_param_for_match(actual_parameter)
-    actual_exact_key = normalize_param_exact_for_match(actual_parameter)
-
-    # 0. 如果目标规格/仿真值中有电压后缀，先按保留电压后缀的完整 Key 精确匹配。
-    if "Base_Key_Exact" in df.columns:
-        exact_voltage = df[df["Base_Key_Exact"] == actual_exact_key]
-
-        if not exact_voltage.empty:
-            return exact_voltage.copy()
 
     # 1/2/3. 按候选 Key 顺序精确匹配
     candidate_keys = get_candidate_match_keys(actual_parameter)
