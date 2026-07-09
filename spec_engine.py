@@ -1873,3 +1873,640 @@ def run_analysis(
         "output_file": output_file,
     }
 
+
+
+# ============================================================
+# 15. V8 Safe Overrides: voltage-group target/sim support
+#     基于 V6 稳定版追加，避免启动阶段白屏。
+# ============================================================
+
+# 保存 V6 标准读取函数，宽表识别失败时回退使用。
+_read_target_spec_standard_v6 = read_target_spec
+_read_sim_value_standard_v6 = read_sim_value
+
+
+def detect_voltage_range_from_text(x):
+    """
+    从文本中识别电压范围，例如：
+    1.65V-2.3V、2.3V-3.6V、1.65V~2.3V。
+    """
+    s = normalize_text(x)
+
+    if not s:
+        return ""
+
+    s = (
+        s.replace("－", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("~", "-")
+        .replace("～", "-")
+    )
+
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*V\s*-\s*(\d+(?:\.\d+)?)\s*V",
+        s,
+        re.IGNORECASE,
+    )
+
+    if m:
+        return f"{m.group(1)}V-{m.group(2)}V"
+
+    return ""
+
+
+def append_voltage_suffix(parameter, voltage_range):
+    base = normalize_text(parameter)
+    voltage = normalize_text(voltage_range)
+
+    if not base or not voltage:
+        return base
+
+    if base.upper().endswith(("_" + voltage).upper()):
+        return base
+
+    return f"{base}_{voltage}"
+
+
+def strip_voltage_suffix(parameter):
+    """
+    去掉 Parameter 末尾电压后缀，用于兜底匹配。
+    例：ILI_1.65V-2.3V -> ILI
+    """
+    s = normalize_text(parameter)
+    if not s:
+        return ""
+
+    return re.sub(
+        r"_[0-9]+(?:\.[0-9]+)?V-[0-9]+(?:\.[0-9]+)?V$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+
+
+def add_match_keys(df):
+    if df is None or df.empty:
+        return df
+
+    if "Base_Parameter" not in df.columns:
+        return df
+
+    df = df.copy()
+    df["Base_Parameter"] = df["Base_Parameter"].astype(str).str.strip()
+    df["Base_Key"] = df["Base_Parameter"].apply(normalize_param_for_match)
+    return df
+
+
+def get_candidate_match_keys(parameter):
+    """
+    V8 安全版匹配 Key：
+    1. 完整参数，保留电压后缀
+    2. 去掉电压后缀后的参数
+    3. ICC3 频率规则
+    4. 第一个下划线前基础参数
+    """
+    actual_key = normalize_param_for_match(parameter)
+    stripped_parameter = strip_voltage_suffix(parameter)
+    stripped_key = normalize_param_for_match(stripped_parameter)
+
+    keys = [actual_key]
+
+    if stripped_key and stripped_key != actual_key:
+        keys.append(stripped_key)
+
+    for p in [parameter, stripped_parameter]:
+        icc3_key = get_icc3_freq_base_key(p)
+        if icc3_key:
+            keys.append(icc3_key)
+
+    for p in [stripped_parameter, parameter]:
+        first_base_key = get_first_underscore_base_key(p)
+        if first_base_key:
+            keys.append(first_base_key)
+
+    result = []
+    for k in keys:
+        if k and k not in result:
+            result.append(k)
+
+    return result
+
+
+def get_best_match_rows(actual_parameter, df):
+    """
+    V8 安全版匹配：
+    - 先按带电压后缀的完整 Parameter 精确匹配
+    - 再按去电压后缀/ICC3频率/基础参数匹配
+    - 最后做最长前缀匹配
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if "Base_Key" not in df.columns and "Base_Parameter" in df.columns:
+        df = add_match_keys(df)
+
+    if "Base_Key" not in df.columns:
+        return pd.DataFrame()
+
+    actual_key = normalize_param_for_match(actual_parameter)
+
+    exact = df[df["Base_Key"] == actual_key]
+    if not exact.empty:
+        return exact.copy()
+
+    for key in get_candidate_match_keys(actual_parameter):
+        exact = df[df["Base_Key"] == key]
+        if not exact.empty:
+            return exact.copy()
+
+    candidates = []
+
+    for _, row in df.iterrows():
+        standard_key = normalize_text(row.get("Base_Key", ""))
+
+        if not standard_key:
+            continue
+
+        # 同时用完整 key 和去电压后的 key 做前缀匹配
+        for actual in [actual_key, normalize_param_for_match(strip_voltage_suffix(actual_parameter))]:
+            if actual and is_prefix_match(actual, standard_key):
+                candidates.append((len(standard_key), row))
+                break
+
+    if not candidates:
+        return pd.DataFrame()
+
+    max_len = max(x[0] for x in candidates)
+    best_rows = [x[1] for x in candidates if x[0] == max_len]
+
+    return pd.DataFrame(best_rows)
+
+
+def _find_header_row_for_voltage_file(raw_df):
+    for r in range(min(20, len(raw_df))):
+        row_keys = [clean_column_name(v) for v in raw_df.iloc[r].tolist()]
+        if any(k in ["BASEPARAMETER", "PARAMETER", "SYMBOL", "基础参数", "标准参数", "参数"] for k in row_keys):
+            return r
+    return None
+
+
+def _find_voltage_row(raw_df, header_row_idx, max_scan_rows=8):
+    start = header_row_idx + 1
+    end = min(len(raw_df), header_row_idx + 1 + max_scan_rows)
+
+    for r in range(start, end):
+        row_values = raw_df.iloc[r].tolist()
+        row_text = " ".join([normalize_text(v) for v in row_values])
+        voltage_count = sum(1 for v in row_values if detect_voltage_range_from_text(v))
+
+        if ("VOLTAGE" in row_text.upper() or "电压" in row_text) and voltage_count >= 1:
+            return r
+
+    return None
+
+
+def _get_basic_columns_from_header(header_values):
+    result = {"base_col": None, "spec_col": None, "unit_col": None}
+
+    for c, value in enumerate(header_values):
+        key = clean_column_name(value)
+
+        if key in ["BASEPARAMETER", "PARAMETER", "SYMBOL", "基础参数", "标准参数", "参数"]:
+            result["base_col"] = c
+        elif key in ["SPECTYPE", "TYPE", "规格类型", "参数类型"]:
+            result["spec_col"] = c
+        elif key in ["UNIT", "单位"]:
+            result["unit_col"] = c
+
+    return result
+
+
+def _classify_temp_column_for_voltage_file(header_value, mode):
+    key = clean_column_name(header_value)
+
+    if mode == "target":
+        if key in ["TARGET90C", "TARGET90", "SPEC90C", "SPEC90", "90C", "90"]:
+            return "Target_90C"
+        if key in ["TARGET110C", "TARGET110", "SPEC110C", "SPEC110", "110C", "110"]:
+            return "Target_110C"
+        if key in ["TARGET130C", "TARGET130", "SPEC130C", "SPEC130", "130C", "130"]:
+            return "Target_130C"
+        return ""
+
+    if mode == "sim":
+        if key in ["SIMTYP25C", "SIM25C", "25CSIM", "25CTYP", "SIMTYP", "TARGET25C", "25C", "25"]:
+            return "Sim_Typ_25C"
+        if key in ["SIMWORST90C", "SIM90C", "SIMUPTO90C", "SIMULATED90C", "SIMULATED90", "90CSIM", "TARGET90C", "SPEC90C", "90C", "90"]:
+            return "Sim_Worst_90C"
+        if key in ["SIMWORST110C", "SIM110C", "SIMUPTO110C", "SIMULATED110C", "SIMULATED110", "110CSIM", "TARGET110C", "SPEC110C", "110C", "110"]:
+            return "Sim_Worst_110C"
+        if key in ["SIMWORST130C", "SIM130C", "SIMUPTO130C", "SIMULATED130C", "SIMULATED130", "130CSIM", "TARGET130C", "SPEC130C", "130C", "130"]:
+            return "Sim_Worst_130C"
+        return ""
+
+    return ""
+
+
+def parse_voltage_wide_spec_file(file_path, mode):
+    """
+    读取电压分组宽表格式的目标规格/仿真值。
+
+    支持示例：
+    Base_Parameter | Spec_Type | Target_90C | Target_110C | Target_130C | Target_90C | Target_110C | Target_130C | Unit
+    Voltage        |           | 1.65V-2.3V |              |              | 2.3V-3.6V  |              |              |
+    """
+    raw = pd.read_excel(file_path, sheet_name=0, header=None)
+    header_row_idx = _find_header_row_for_voltage_file(raw)
+
+    if header_row_idx is None:
+        return pd.DataFrame()
+
+    voltage_row_idx = _find_voltage_row(raw, header_row_idx)
+
+    if voltage_row_idx is None:
+        return pd.DataFrame()
+
+    header_values = raw.iloc[header_row_idx].tolist()
+    voltage_values = raw.iloc[voltage_row_idx].tolist()
+    basic_cols = _get_basic_columns_from_header(header_values)
+
+    base_col = basic_cols["base_col"]
+    spec_col = basic_cols["spec_col"]
+    unit_col = basic_cols["unit_col"]
+
+    if base_col is None:
+        return pd.DataFrame()
+
+    voltage_by_col = []
+    current_voltage = ""
+
+    for value in voltage_values:
+        voltage = detect_voltage_range_from_text(value)
+        if voltage:
+            current_voltage = voltage
+        voltage_by_col.append(current_voltage)
+
+    value_columns = []
+
+    for c, header_value in enumerate(header_values):
+        output_col = _classify_temp_column_for_voltage_file(header_value, mode)
+        voltage = voltage_by_col[c] if c < len(voltage_by_col) else ""
+
+        if output_col and voltage:
+            value_columns.append({
+                "col": c,
+                "voltage": voltage,
+                "output_col": output_col,
+            })
+
+    if not value_columns:
+        return pd.DataFrame()
+
+    voltage_order = []
+    for info in value_columns:
+        if info["voltage"] not in voltage_order:
+            voltage_order.append(info["voltage"])
+
+    rows = []
+
+    for r in range(voltage_row_idx + 1, len(raw)):
+        base_parameter = normalize_text(raw.iloc[r, base_col])
+
+        if not base_parameter:
+            continue
+
+        if clean_column_name(base_parameter) in ["VOLTAGE", "BASEPARAMETER", "PARAMETER", "SYMBOL"]:
+            continue
+
+        spec_type = normalize_text(raw.iloc[r, spec_col]) if spec_col is not None else ""
+        unit = normalize_text(raw.iloc[r, unit_col]) if unit_col is not None else ""
+
+        for voltage in voltage_order:
+            display_parameter = append_voltage_suffix(base_parameter, voltage)
+
+            if mode == "target":
+                row_dict = {
+                    "Base_Parameter": display_parameter,
+                    "Spec_Type": spec_type,
+                    "Target_90C": np.nan,
+                    "Target_110C": np.nan,
+                    "Target_130C": np.nan,
+                    "Unit": unit,
+                    "Remark": "",
+                }
+            else:
+                row_dict = {
+                    "Base_Parameter": display_parameter,
+                    "Spec_Type": spec_type,
+                    "Sim_Typ_25C": np.nan,
+                    "Sim_Worst_90C": np.nan,
+                    "Sim_Worst_110C": np.nan,
+                    "Sim_Worst_130C": np.nan,
+                    "Unit": unit,
+                    "Remark": "",
+                }
+
+            for info in value_columns:
+                if info["voltage"] != voltage:
+                    continue
+
+                value = to_number(raw.iloc[r, info["col"]])
+                row_dict[info["output_col"]] = value
+
+            if mode == "sim" and pd.isna(row_dict.get("Sim_Typ_25C", np.nan)) and is_typ_spec_value(spec_type):
+                for col_name in ["Sim_Worst_90C", "Sim_Worst_110C", "Sim_Worst_130C"]:
+                    value = to_number(row_dict.get(col_name, np.nan))
+                    if not pd.isna(value):
+                        row_dict["Sim_Typ_25C"] = value
+                        break
+
+            numeric_cols = [c for c in row_dict.keys() if c.startswith("Target_") or c.startswith("Sim_")]
+            if any(not pd.isna(to_number(row_dict.get(c, np.nan))) for c in numeric_cols):
+                rows.append(row_dict)
+
+    result = pd.DataFrame(rows)
+
+    if result.empty:
+        return result
+
+    result = add_match_keys(result)
+    return result
+
+
+def read_target_spec(target_file):
+    wide_df = parse_voltage_wide_spec_file(target_file, mode="target")
+
+    if not wide_df.empty:
+        print("目标规格文件读取完成，识别到电压分组宽表格式，参数数量：", len(wide_df))
+        return wide_df
+
+    df = _read_target_spec_standard_v6(target_file)
+    df = add_match_keys(df)
+    return df
+
+
+def read_sim_value(sim_file):
+    wide_df = parse_voltage_wide_spec_file(sim_file, mode="sim")
+
+    if not wide_df.empty:
+        print("仿真值文件读取完成，识别到电压分组宽表格式，参数数量：", len(wide_df))
+        return wide_df
+
+    df = _read_sim_value_standard_v6(sim_file)
+
+    # 标准格式兜底：如果 typ 行没有 Sim_Typ_25C，但 90/110/130 有值，则取第一个非空值作为 Sim_Typ_25C。
+    if "Spec_Type" in df.columns:
+        for idx, row in df.iterrows():
+            if pd.isna(to_number(row.get("Sim_Typ_25C", np.nan))) and is_typ_spec_value(row.get("Spec_Type", "")):
+                for col_name in ["Sim_Worst_90C", "Sim_Worst_110C", "Sim_Worst_130C"]:
+                    value = to_number(row.get(col_name, np.nan))
+                    if not pd.isna(value):
+                        df.at[idx, "Sim_Typ_25C"] = value
+                        break
+
+    df = add_match_keys(df)
+    return df
+
+
+def _build_voltage_by_col(df, stat_row_idx):
+    """读取 Lot Index 页表头里的电压分组，并向右填充。"""
+    voltage_by_col = []
+    current_voltage = ""
+
+    for c in range(df.shape[1]):
+        header_text = " ".join([
+            normalize_text(df.iloc[rr, c])
+            for rr in range(0, stat_row_idx + 1)
+        ])
+        voltage = detect_voltage_range_from_text(header_text)
+        if voltage:
+            current_voltage = voltage
+        voltage_by_col.append(current_voltage)
+
+    return voltage_by_col
+
+
+def read_lot_index(file_path):
+    lot_name = os.path.splitext(os.path.basename(file_path))[0]
+
+    try:
+        df = pd.read_excel(file_path, sheet_name=INDEX_SHEET_NAME, header=None)
+    except Exception as e:
+        print(f"[跳过] {lot_name}：没有找到 Index 页。错误信息：{e}")
+        return pd.DataFrame()
+
+    stat_row_idx = None
+
+    for i in range(min(20, len(df))):
+        row_values = [clean_stat(v) for v in df.iloc[i].tolist()]
+        count_stat = sum([1 for v in row_values if v in ["Min", "Typ", "Max"]])
+
+        if count_stat >= 3:
+            stat_row_idx = i
+            break
+
+    if stat_row_idx is None:
+        print(f"[跳过] {lot_name}：Index 页没有识别到 Min/Typ/Max 行。")
+        return pd.DataFrame()
+
+    temp_row_idx = max(stat_row_idx - 1, 0)
+
+    temp_row = df.iloc[temp_row_idx].copy().ffill()
+    stat_row = df.iloc[stat_row_idx].copy()
+    voltage_by_col = _build_voltage_by_col(df, stat_row_idx)
+
+    value_infos = []
+
+    for c in range(df.shape[1]):
+        stat = clean_stat(stat_row.iloc[c])
+        temp = parse_temp(temp_row.iloc[c])
+
+        if stat in ["Min", "Typ", "Max"] and temp is not None:
+            header_text = " ".join([
+                normalize_text(df.iloc[rr, c])
+                for rr in range(0, stat_row_idx + 1)
+            ])
+
+            edge = detect_edge_from_text(header_text)
+            voltage_range = voltage_by_col[c] if c < len(voltage_by_col) else ""
+
+            value_infos.append({
+                "col": c,
+                "temp": temp,
+                "stat": stat,
+                "edge": edge,
+                "voltage_range": voltage_range,
+            })
+
+    if not value_infos:
+        print(f"[跳过] {lot_name}：没有识别到有效温度数据列。")
+        return pd.DataFrame()
+
+    first_value_col = min([x["col"] for x in value_infos])
+
+    edge_col = None
+
+    for c in range(0, first_value_col):
+        header_text = " ".join([
+            normalize_text(df.iloc[rr, c])
+            for rr in range(0, stat_row_idx + 1)
+        ])
+        header_key = clean_column_name(header_text)
+
+        if "EDGE" in header_key or "边沿" in header_text:
+            edge_col = c
+            break
+
+    if edge_col is not None:
+        print(f"{lot_name} 识别到 Edge 列：第 {edge_col + 1} 列")
+    else:
+        print(f"{lot_name} 未识别到 Edge 列，将尝试从行描述中识别 FE/RE")
+
+    records = []
+    last_parameter = ""
+
+    for r in range(stat_row_idx + 1, len(df)):
+        raw_parameter = normalize_text(df.iloc[r, 0])
+
+        edge_cell = ""
+        if edge_col is not None:
+            edge_cell = normalize_text(df.iloc[r, edge_col])
+
+        edge_from_edge_col = detect_edge_from_text(edge_cell)
+
+        if raw_parameter and raw_parameter.lower() not in ["symbol", "parameter", "参数", "test item", "item"]:
+            last_parameter = raw_parameter
+
+        base_parameter = raw_parameter if raw_parameter else last_parameter
+
+        if not base_parameter:
+            continue
+
+        if base_parameter.lower() in ["symbol", "parameter", "参数", "test item", "item"]:
+            continue
+
+        row_meta_cells = []
+
+        for cc in range(0, first_value_col):
+            row_meta_cells.append(normalize_text(df.iloc[r, cc]))
+
+        row_meta_text = " ".join(row_meta_cells)
+        test_condition = normalize_text(df.iloc[r, 2]) if df.shape[1] > 2 else row_meta_text
+        row_edge = edge_from_edge_col if edge_from_edge_col else detect_edge_from_text(row_meta_text)
+
+        unit = ""
+
+        for c in range(0, first_value_col):
+            cell = normalize_text(df.iloc[r, c])
+            if cell in ["uA", "μA", "mA", "A", "V", "mV", "ns", "us", "μs", "ms", "s", "MHz"]:
+                unit = cell
+                break
+
+        for info in value_infos:
+            c = info["col"]
+            temp = info["temp"]
+            stat = info["stat"]
+            edge = info["edge"]
+            voltage_range = info.get("voltage_range", "")
+
+            value = to_number(df.iloc[r, c])
+
+            if temp is None or not stat or pd.isna(value):
+                continue
+
+            condition_edge = detect_edge_from_text(test_condition)
+            parameter_edge = detect_edge_from_text(base_parameter)
+
+            if edge_from_edge_col:
+                final_edge = edge_from_edge_col
+            elif parameter_edge:
+                final_edge = parameter_edge
+            elif row_edge:
+                final_edge = row_edge
+            elif condition_edge:
+                final_edge = condition_edge
+            else:
+                final_edge = edge
+
+            display_parameter = append_voltage_suffix(base_parameter, voltage_range)
+
+            records.append({
+                "Lot": lot_name,
+                "Parameter": display_parameter,
+                "Base_Parameter": base_parameter,
+                "Voltage_Range": voltage_range,
+                "Test_Condition": test_condition,
+                "Edge": final_edge,
+                "Unit_From_Lot": unit,
+                "Temp": temp,
+                "Stat": stat,
+                "Value": value,
+                "Source_File": os.path.basename(file_path),
+            })
+
+    lot_df = pd.DataFrame(records)
+    print(f"{lot_name} 读取完成，数据点数量：{len(lot_df)}")
+
+    return lot_df
+
+
+def read_all_lots(lot_dir):
+    all_data = []
+
+    for file in os.listdir(lot_dir):
+        if file.startswith("~$"):
+            continue
+
+        if not file.lower().endswith((".xlsx", ".xlsm")):
+            continue
+
+        file_path = os.path.join(lot_dir, file)
+        print("正在读取 Lot 文件：", file)
+        lot_df = read_lot_index(file_path)
+
+        if not lot_df.empty:
+            all_data.append(lot_df)
+
+    if not all_data:
+        raise ValueError("没有读取到任何 Lot 数据，请检查 lots 文件夹和每个 Lot 文件的 Index 页。")
+
+    raw_df = pd.concat(all_data, ignore_index=True)
+
+    # 调整 Raw 顺序，让 Summary 参数按电压分组输出：
+    # ILI_1.65V-2.3V ... tVSL_1.65V-2.3V，然后 ILI_2.3V-3.6V ...
+    if "Voltage_Range" in raw_df.columns and "Base_Parameter" in raw_df.columns:
+        raw_df = raw_df.copy()
+        raw_df["__orig_order"] = range(len(raw_df))
+
+        voltage_order = [
+            v for v in dict.fromkeys(raw_df["Voltage_Range"].fillna("").astype(str).tolist())
+            if normalize_text(v)
+        ]
+        base_order = list(dict.fromkeys(raw_df["Base_Parameter"].fillna("").astype(str).tolist()))
+
+        voltage_rank = {v: i for i, v in enumerate(voltage_order)}
+        base_rank = {v: i for i, v in enumerate(base_order)}
+
+        def _sort_key(row):
+            voltage = normalize_text(row.get("Voltage_Range", ""))
+            base = normalize_text(row.get("Base_Parameter", ""))
+            if voltage:
+                return (
+                    voltage_rank.get(voltage, 10_000),
+                    base_rank.get(base, 10_000),
+                    row["__orig_order"],
+                )
+            return (20_000, base_rank.get(base, 10_000), row["__orig_order"])
+
+        sort_keys = raw_df.apply(_sort_key, axis=1)
+        raw_df["__v_rank"] = [x[0] for x in sort_keys]
+        raw_df["__b_rank"] = [x[1] for x in sort_keys]
+        raw_df["__o_rank"] = [x[2] for x in sort_keys]
+        raw_df = raw_df.sort_values(["__v_rank", "__b_rank", "__o_rank"]).drop(
+            columns=["__orig_order", "__v_rank", "__b_rank", "__o_rank"]
+        )
+        raw_df = raw_df.reset_index(drop=True)
+
+    print("所有 Lot 读取完成，总数据点数量：", len(raw_df))
+    return raw_df
