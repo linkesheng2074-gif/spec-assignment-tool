@@ -1537,7 +1537,7 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             "Assign_Rule": rule,
             "Analysis_Direction": side,
 
-            "Test_Avg_25C": round_value(avg_25),
+            "Test_Avg_25C": round_value(avg_25) if is_typ_row else "",
             "Test_Worst_UpTo90C": round_value(worst_90),
             "Test_Worst_UpTo110C": round_value(worst_110),
             "Test_Worst_UpTo130C": round_value(worst_130),
@@ -1969,6 +1969,7 @@ def get_command_prefix_base_key(parameter):
     EBH_SPI_6dummy_DRV10 -> EBH
     BBH_4D_WRAP_16BYTE -> BBH
     03H_SPI_DRV10_1.65V-2.3V -> 03H
+    1B_BBH / 4B_BBH / 8B_BBH -> BBH
 
     用于让详细后缀参数自动 Follow 赋值标准中的 03H / 3BH / EBH / BBH 等基础规则。
     """
@@ -1978,12 +1979,14 @@ def get_command_prefix_base_key(parameter):
     if not key:
         return ""
 
-    # 优先取第一个下划线前的 token
-    token = key.split("_")[0]
+    # SPI NOR 常见指令格式：03H、0BH、3BH、6BH、90H、9FH、BBH、EBH、02H 等。
+    # 1B_BBH / 4B_BBH / 8B_BBH 这类参数，第一个 token 不是指令，
+    # 需要继续向后找 BBH / EBH / EDH 等真正指令 token。
+    tokens = [t for t in key.split("_") if t]
 
-    # SPI NOR 常见指令格式：03H、0BH、3BH、6BH、90H、9FH、BBH、EBH、02H 等
-    if re.fullmatch(r"[0-9A-F]{2,3}H", token):
-        return token
+    for token in tokens:
+        if re.fullmatch(r"[0-9A-F]{2,3}H", token):
+            return token
 
     # 兜底：即使没有下划线，也从开头识别 2~3 位十六进制指令
     m = re.match(r"^([0-9A-F]{2,3}H)", key)
@@ -2910,7 +2913,7 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             "Unit": row_dict["Unit"],
             "Assign_Rule": rule,
             "Analysis_Direction": side,
-            "Test_Avg_25C": round_value(avg_25),
+            "Test_Avg_25C": round_value(avg_25) if is_typ_row else "",
             "Test_Worst_UpTo90C": round_value(worst_90),
             "Test_Worst_UpTo110C": round_value(worst_110),
             "Test_Worst_UpTo130C": round_value(worst_130),
@@ -3322,7 +3325,7 @@ def build_summary(template_df, raw_df, assign_df, target_df, sim_df):
             "Unit": row_dict["Unit"],
             "Assign_Rule": rule,
             "Analysis_Direction": side,
-            "Test_Avg_25C": round_value(avg_25),
+            "Test_Avg_25C": round_value(avg_25) if is_typ_row else "",
             "Test_Worst_UpTo90C": round_value(worst_90),
             "Test_Worst_UpTo110C": round_value(worst_110),
             "Test_Worst_UpTo130C": round_value(worst_130),
