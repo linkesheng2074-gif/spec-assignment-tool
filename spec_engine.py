@@ -2292,14 +2292,34 @@ def parse_voltage_wide_spec_file(file_path, mode):
     return result
 
 
+
+def coerce_numeric_cols(df, cols):
+    """
+    pandas 3.x 对列 dtype 更严格：如果某列被识别为 str，
+    后续再写入 float 会报 Invalid value for dtype 'str'。
+    这里统一把目标/仿真数值列转为 float，避免无电压格式文件报错。
+    """
+    if df is None or df.empty:
+        return df
+
+    for col in cols:
+        if col in df.columns:
+            df[col] = df[col].apply(to_number).astype("float64")
+
+    return df
+
 def read_target_spec(target_file):
     wide_df = parse_voltage_wide_spec_file(target_file, mode="target")
 
+    target_cols = ["Target_90C", "Target_110C", "Target_130C"]
+
     if not wide_df.empty:
+        wide_df = coerce_numeric_cols(wide_df, target_cols)
         print("目标规格文件读取完成，识别到电压分组宽表格式，参数数量：", len(wide_df))
         return wide_df
 
     df = _read_target_spec_standard_v6(target_file)
+    df = coerce_numeric_cols(df, target_cols)
     df = add_match_keys(df)
     return df
 
@@ -2307,11 +2327,15 @@ def read_target_spec(target_file):
 def read_sim_value(sim_file):
     wide_df = parse_voltage_wide_spec_file(sim_file, mode="sim")
 
+    sim_cols = ["Sim_Typ_25C", "Sim_Worst_90C", "Sim_Worst_110C", "Sim_Worst_130C"]
+
     if not wide_df.empty:
+        wide_df = coerce_numeric_cols(wide_df, sim_cols)
         print("仿真值文件读取完成，识别到电压分组宽表格式，参数数量：", len(wide_df))
         return wide_df
 
     df = _read_sim_value_standard_v6(sim_file)
+    df = coerce_numeric_cols(df, sim_cols)
 
     # 标准格式兜底：如果 typ 行没有 Sim_Typ_25C，但 90/110/130 有值，则取第一个非空值作为 Sim_Typ_25C。
     if "Spec_Type" in df.columns:
