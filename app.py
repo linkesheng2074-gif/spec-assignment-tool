@@ -8,7 +8,7 @@ st.set_page_config(page_title="规格书赋值分析工具", layout="wide")
 
 st.title("规格书赋值分析工具")
 st.success("页面已启动。如果能看到这行，说明 Streamlit 页面本身正常。")
-st.caption("V12 电压安全版：页面启动时不导入分析引擎，点击开始分析后才导入 spec_engine.py，避免白屏。")
+st.caption("V13 防白屏版：保持 V6 页面排布，点击开始分析后才导入分析引擎。")
 
 with st.sidebar:
     st.header("使用说明")
