@@ -1889,8 +1889,15 @@ _read_sim_value_standard_v6 = read_sim_value
 
 def detect_voltage_range_from_text(x):
     """
-    从文本中识别电压范围，例如：
-    1.65V-2.3V、2.3V-3.6V、1.65V~2.3V。
+    从文本中识别任意电压范围，不限制具体电压值。
+
+    支持示例：
+    - 1.65V-2.3V
+    - 1.65V~2.0V
+    - 1.65-2.0V
+    - Voltage: 2.7V - 3.6V
+
+    返回统一格式：1.65V-2.0V。
     """
     s = normalize_text(x)
 
@@ -1905,11 +1912,20 @@ def detect_voltage_range_from_text(x):
         .replace("～", "-")
     )
 
+    # 优先识别两端都带 V 的标准格式。
     m = re.search(
         r"(\d+(?:\.\d+)?)\s*V\s*-\s*(\d+(?:\.\d+)?)\s*V",
         s,
         re.IGNORECASE,
     )
+
+    # 兼容 1.65-2.0V / 1.65 V - 2.0 这类写法。
+    if not m:
+        m = re.search(
+            r"(\d+(?:\.\d+)?)\s*V?\s*-\s*(\d+(?:\.\d+)?)\s*V",
+            s,
+            re.IGNORECASE,
+        )
 
     if m:
         return f"{m.group(1)}V-{m.group(2)}V"
@@ -1933,7 +1949,9 @@ def append_voltage_suffix(parameter, voltage_range):
 def strip_voltage_suffix(parameter):
     """
     去掉 Parameter 末尾电压后缀，用于兜底匹配。
-    例：ILI_1.65V-2.3V -> ILI
+    例：
+    ILI_1.65V-2.3V -> ILI
+    ICC1_2.0V-2.7V -> ICC1
     """
     s = normalize_text(parameter)
     if not s:
